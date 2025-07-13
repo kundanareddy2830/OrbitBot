@@ -225,6 +225,30 @@ ANSWER:
 async def root():
     return {"message": "MOSDAC Knowledge Navigator API is running! Access /docs for Swagger UI."}
 
+@app.head("/")
+async def root_head():
+    """HEAD method for root endpoint - returns same headers as GET but no body"""
+    return {"message": "MOSDAC Knowledge Navigator API is running! Access /docs for Swagger UI."}
+
+@app.head("/hybrid-search")
+async def hybrid_search_head():
+    """HEAD method for hybrid-search endpoint - returns headers only"""
+    return {
+        "endpoint": "/hybrid-search",
+        "method": "POST",
+        "description": "Hybrid RAG search endpoint for MOSDAC queries",
+        "content_type": "application/json",
+        "request_schema": {
+            "question": "string (required)"
+        },
+        "response_schema": {
+            "question": "string",
+            "answer": "string", 
+            "kg_context": "string",
+            "vector_db_context": "string"
+        }
+    }
+
 print("--- Step 5: FastAPI App Initialized ---")
 
 # --- Step 6: Instructions to Run Locally ---
