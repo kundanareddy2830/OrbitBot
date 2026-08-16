@@ -1,153 +1,624 @@
+```python
 # ==============================================================================
-# FastAPI Backend: Hybrid Search (Local Host Version)
-# This script wraps your successful test logic into a FastAPI API.
+# FastAPI Backend: OrbitBot Hybrid Search
+#
+# Supports:
+#   1. Google Gemini
+#   2. OpenRouter
+#   3. Together AI
+#
+# LLM provider priority:
+#   Gemini -> OpenRouter -> Together
+#
+# If one provider fails during generation, the next available provider
+# is automatically attempted.
 # ==============================================================================
 
-# --- Step 1: Imports ---
+
+# ==============================================================================
+# STEP 1: IMPORTS
+# ==============================================================================
+
 import os
 import asyncio
 import re
-from typing import List
 
-# FastAPI specific imports
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware # Essential for frontend access
+from fastapi.middleware.cors import CORSMiddleware
 
-# LangChain and other core components
 from langchain_community.vectorstores import Chroma
 from langchain_community.graphs import Neo4jGraph
+from langchain_community.embeddings import HuggingFaceInferenceAPIEmbeddings
+
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openrouter import ChatOpenRouter
 from langchain_together import ChatTogether
-from langchain.prompts import PromptTemplate
-from langchain.chains import RetrievalQA
-from langchain.embeddings import HuggingFaceInferenceAPIEmbeddings
 
-# Pydantic for API request/response models
-from pydantic import BaseModel, Field
-
-# For loading .env file
+from pydantic import BaseModel
 from dotenv import load_dotenv
+
 
 print("--- Step 1: Imports Complete ---")
 
-# --- Step 2: Configuration and Connections ---
-print("\n--- Step 2: Configuring Connections ---")
 
-# Load environment variables from .env file
+# ==============================================================================
+# STEP 2: LOAD ENVIRONMENT VARIABLES
+# ==============================================================================
+
+print("\n--- Step 2: Loading Configuration ---")
+
 load_dotenv()
 
-# API Keys and Credentials from .env
+
+# ------------------------------------------------------------------------------
+# LLM API Keys
+# ------------------------------------------------------------------------------
+
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
+
+
+# ------------------------------------------------------------------------------
+# LLM Models
+#
+# These can be changed from .env without changing Python code.
+# ------------------------------------------------------------------------------
+
+GEMINI_MODEL = os.getenv(
+    "GEMINI_MODEL",
+    "gemini-2.5-flash"
+)
+
+OPENROUTER_MODEL = os.getenv(
+    "OPENROUTER_MODEL",
+    "google/gemini-2.5-flash"
+)
+
+TOGETHER_MODEL = os.getenv(
+    "TOGETHER_MODEL",
+    "mistralai/Mixtral-8x7B-Instruct-v0.1"
+)
+
+
+# ------------------------------------------------------------------------------
+# Neo4j
+# ------------------------------------------------------------------------------
+
 NEO4J_URI = os.getenv("NEO4J_URI")
 NEO4J_USERNAME = os.getenv("NEO4J_USERNAME")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 
-# Local path for ChromaDB (relative to your project folder)
-# MAKE SURE your copied ChromaDB folder matches this path/name!
-CHROMA_PERSIST_DIR = "OrbitBot/Backend/chroma_db" 
-CHROMA_COLLECTION_NAME = "mosdac_knowledge_unified"
 
-# Load HuggingFace API key from .env
+# ------------------------------------------------------------------------------
+# Hugging Face
+# ------------------------------------------------------------------------------
+
 HF_API_KEY = os.getenv("HF_API_KEY")
 
-print("✅ Environment and Paths Configured.")
 
-# --- Step 3: Initialize LLM, KG, VectorDB ---
-print("\n--- Step 3: Initializing Models ---")
+# ------------------------------------------------------------------------------
+# ChromaDB
+# ------------------------------------------------------------------------------
 
-llm = ChatTogether(
-    together_api_key=TOGETHER_API_KEY,
-    model="mistralai/Mixtral-8x7B-Instruct-v0.1",
-    temperature=0.1,
-    max_tokens=2048
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+CHROMA_PERSIST_DIR = os.path.join(
+    BASE_DIR,
+    "chroma_db"
 )
-print("✅ LLM Initialized.")
 
-# Use HuggingFace Inference API for embeddings (no local model, low memory)
-embedding_model = HuggingFaceInferenceAPIEmbeddings(
-    api_key=HF_API_KEY,
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
+CHROMA_COLLECTION_NAME = "mosdac_knowledge_unified"
+
+
+print("Environment configuration loaded.")
+print(f"Gemini configured:      {bool(GOOGLE_API_KEY)}")
+print(f"OpenRouter configured:  {bool(OPENROUTER_API_KEY)}")
+print(f"Together configured:    {bool(TOGETHER_API_KEY)}")
+
+
+# ==============================================================================
+# STEP 3: INITIALIZE LLM PROVIDERS
+# ==============================================================================
+
+print("\n--- Step 3: Initializing LLM Providers ---")
+
+
+llm_providers = []
+
+
+# ------------------------------------------------------------------------------
+# Gemini
+# ------------------------------------------------------------------------------
+
+if GOOGLE_API_KEY:
+
+    try:
+
+        gemini_llm = ChatGoogleGenerativeAI(
+            model=GEMINI_MODEL,
+            google_api_key=GOOGLE_API_KEY,
+            temperature=0.1,
+            max_tokens=2048
+        )
+
+        llm_providers.append(
+            {
+                "name": "Gemini",
+                "model": GEMINI_MODEL,
+                "client": gemini_llm
+            }
+        )
+
+        print(
+            f"Gemini available: {GEMINI_MODEL}"
+        )
+
+    except Exception as e:
+
+        print(
+            f"Gemini initialization failed: {e}"
+        )
+
+
+# ------------------------------------------------------------------------------
+# OpenRouter
+# ------------------------------------------------------------------------------
+
+if OPENROUTER_API_KEY:
+
+    try:
+
+        openrouter_llm = ChatOpenRouter(
+            model=OPENROUTER_MODEL,
+            api_key=OPENROUTER_API_KEY,
+            temperature=0.1,
+            max_tokens=2048
+        )
+
+        llm_providers.append(
+            {
+                "name": "OpenRouter",
+                "model": OPENROUTER_MODEL,
+                "client": openrouter_llm
+            }
+        )
+
+        print(
+            f"OpenRouter available: {OPENROUTER_MODEL}"
+        )
+
+    except Exception as e:
+
+        print(
+            f"OpenRouter initialization failed: {e}"
+        )
+
+
+# ------------------------------------------------------------------------------
+# Together AI
+# ------------------------------------------------------------------------------
+
+if TOGETHER_API_KEY:
+
+    try:
+
+        together_llm = ChatTogether(
+            together_api_key=TOGETHER_API_KEY,
+            model=TOGETHER_MODEL,
+            temperature=0.1,
+            max_tokens=2048
+        )
+
+        llm_providers.append(
+            {
+                "name": "Together",
+                "model": TOGETHER_MODEL,
+                "client": together_llm
+            }
+        )
+
+        print(
+            f"Together available: {TOGETHER_MODEL}"
+        )
+
+    except Exception as e:
+
+        print(
+            f"Together initialization failed: {e}"
+        )
+
+
+# ------------------------------------------------------------------------------
+# Make sure at least one provider exists
+# ------------------------------------------------------------------------------
+
+if not llm_providers:
+
+    raise RuntimeError(
+        "No LLM provider is configured. "
+        "Set at least one of: "
+        "GOOGLE_API_KEY, OPENROUTER_API_KEY, TOGETHER_API_KEY."
+    )
+
+
+print(
+    f"Available LLM providers: "
+    f"{[provider['name'] for provider in llm_providers]}"
 )
-print("✅ Embedding Model Loaded.")
+
+
+# ==============================================================================
+# STEP 4: INITIALIZE HUGGING FACE EMBEDDINGS
+# ==============================================================================
+
+print("\n--- Step 4: Initializing Embeddings ---")
+
+
+if not HF_API_KEY:
+
+    raise RuntimeError(
+        "HF_API_KEY is missing. "
+        "Hugging Face is required for the current ChromaDB embeddings."
+    )
+
 
 try:
-    graph = Neo4jGraph(url=NEO4J_URI, username=NEO4J_USERNAME, password=NEO4J_PASSWORD)
-    print("✅ Connected to Neo4j KG.")
+
+    embedding_model = HuggingFaceInferenceAPIEmbeddings(
+        api_key=HF_API_KEY,
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
+
+    print(
+        "Hugging Face embedding model initialized."
+    )
+
 except Exception as e:
-    print(f"❌ Failed to connect to Neo4j: {e}. KG might not be fully functional.")
-    graph = None # Set to None to handle gracefully in query functions
+
+    raise RuntimeError(
+        f"Failed to initialize Hugging Face embeddings: {e}"
+    )
+
+
+# ==============================================================================
+# STEP 5: INITIALIZE NEO4J KNOWLEDGE GRAPH
+# ==============================================================================
+
+print("\n--- Step 5: Connecting to Neo4j ---")
+
 
 try:
+
+    graph = Neo4jGraph(
+        url=NEO4J_URI,
+        username=NEO4J_USERNAME,
+        password=NEO4J_PASSWORD
+    )
+
+    print("Connected to Neo4j KG.")
+
+
+except Exception as e:
+
+    print(
+        f"Failed to connect to Neo4j: {e}"
+    )
+
+    print(
+        "KG functionality will be disabled."
+    )
+
+    graph = None
+
+
+# ==============================================================================
+# STEP 6: INITIALIZE CHROMADB
+# ==============================================================================
+
+print("\n--- Step 6: Loading ChromaDB ---")
+
+
+try:
+
     vector_store = Chroma(
         collection_name=CHROMA_COLLECTION_NAME,
         persist_directory=CHROMA_PERSIST_DIR,
         embedding_function=embedding_model
     )
-    retriever = vector_store.as_retriever(search_kwargs={'k': 3})
-    print(f"✅ Vector DB Loaded: {vector_store._collection.count()} documents.")
+
+    retriever = vector_store.as_retriever(
+        search_kwargs={
+            "k": 3
+        }
+    )
+
+    document_count = vector_store._collection.count()
+
+    print(
+        f"ChromaDB loaded successfully."
+    )
+
+    print(
+        f"Documents: {document_count}"
+    )
+
+
 except Exception as e:
-    print(f"❌ Failed to load ChromaDB: {e}. VectorDB might not be fully functional.")
-    vector_store = None # Set to None to handle gracefully in query functions
 
-print("--- Models and Retrievers Initialized ---")
+    print(
+        f"Failed to load ChromaDB: {e}"
+    )
 
-# --- Step 4: Define KG and RAG Query Functions ---
-print("\n--- Step 4: Defining Query Functions ---")
+    print(
+        "VectorDB functionality will be disabled."
+    )
 
-# Known clean entity names in your KG (based on your KG creation script's output sample)
+    vector_store = None
+    retriever = None
+
+
+print("\n--- Models and Retrievers Initialized ---")
+
+
+# ==============================================================================
+# STEP 7: KNOWLEDGE GRAPH ENTITIES
+# ==============================================================================
+
 key_kg_entities = [
-    "MOSDAC", "Kalpana-1", "INSAT-3D", "INSAT-3DR", "Oceansat-2", "SARAL-AltiKa",
-    "OCM", "LISS-IV", "ISRO", "NRSC", "Space Applications Centre"
+
+    "MOSDAC",
+    "Kalpana-1",
+    "INSAT-3D",
+    "INSAT-3DR",
+    "Oceansat-2",
+    "SARAL-AltiKa",
+    "OCM",
+    "LISS-IV",
+    "ISRO",
+    "NRSC",
+    "Space Applications Centre"
+
 ]
 
+
+# ==============================================================================
+# STEP 8: KNOWLEDGE GRAPH QUERY
+# ==============================================================================
+
 async def query_knowledge_graph_async(question: str):
-    print("🧠 Querying Knowledge Graph...")
-    if graph is None: # Check if graph connection was successful at init
-        return "KG is not connected or initialized."
+
+    print("Querying Knowledge Graph...")
+
+
+    if graph is None:
+
+        return (
+            "KG is not connected or initialized."
+        )
+
 
     found_entities = []
+
+
     for entity in key_kg_entities:
-        if re.search(r'\b' + re.escape(entity) + r'\b', question, re.IGNORECASE):
+
+        if re.search(
+            r"\b" + re.escape(entity) + r"\b",
+            question,
+            re.IGNORECASE
+        ):
+
             found_entities.append(entity)
-    
+
+
     if not found_entities:
-        return "KG: No specific, high-confidence entities found for this query."
+
+        return (
+            "KG: No specific, high-confidence "
+            "entities found for this query."
+        )
+
 
     results = []
+
+
     for entity in found_entities:
+
         cypher = f"""
         MATCH (n)
-        WHERE toLower(n.name) = toLower('{entity}') OR toLower(n.description) CONTAINS toLower('{entity}')
-        RETURN n.name AS name, n.description AS description, labels(n) AS labels
+
+        WHERE
+            toLower(n.name) = toLower('{entity}')
+            OR
+            toLower(n.description)
+            CONTAINS toLower('{entity}')
+
+        RETURN
+            n.name AS name,
+            n.description AS description,
+            labels(n) AS labels
+
         LIMIT 1
         """
+
+
         try:
-            query_result = await asyncio.to_thread(graph.query, cypher)
+
+            query_result = await asyncio.to_thread(
+                graph.query,
+                cypher
+            )
+
+
             if query_result:
+
                 for record in query_result:
+
                     results.append(
-                        f"KG Fact: Name='{record.get('name')}', Description='{record.get('description')}'"
+                        f"KG Fact: "
+                        f"Name='{record.get('name')}', "
+                        f"Description='{record.get('description')}'"
                     )
+
+
             else:
-                results.append(f"KG: No direct fact found for '{entity}'.")
-        except Exception as e:
-            results.append(f"KG Error for '{entity}': Query execution failed.")
+
+                results.append(
+                    f"KG: No direct fact found for '{entity}'."
+                )
+
+
+        except Exception:
+
+            results.append(
+                f"KG Error for '{entity}': "
+                f"Query execution failed."
+            )
+
+
     return "\n".join(results)
 
+
+# ==============================================================================
+# STEP 9: VECTOR DATABASE QUERY
+# ==============================================================================
+
 async def query_vector_db_async(question: str):
-    print("📚 Querying Vector DB...")
-    if vector_store is None: # Check if vector_store was successful at init
-        return "VectorDB is not loaded or initialized."
+
+    print("Querying Vector DB...")
+
+
+    if vector_store is None or retriever is None:
+
+        return (
+            "VectorDB is not loaded or initialized."
+        )
+
 
     try:
-        docs = await asyncio.to_thread(retriever.get_relevant_documents, question)
-        return "\n".join([doc.page_content for doc in docs]) if docs else "No documents found."
+
+        docs = await asyncio.to_thread(
+            retriever.invoke,
+            question
+        )
+
+
+        if docs:
+
+            return "\n".join(
+                [
+                    doc.page_content
+                    for doc in docs
+                ]
+            )
+
+
+        return "No documents found."
+
+
     except Exception as e:
-        return f"VectorDB Error: Data retrieval failed."
 
-print("--- Step 4: Query Functions Defined ---")
+        print(
+            f"VectorDB error: {e}"
+        )
 
-# --- Step 5: Initialize FastAPI App and Define Endpoint ---
-print("\n--- Step 5: Initializing FastAPI App ---")
+        return (
+            "VectorDB Error: "
+            "Data retrieval failed."
+        )
+
+
+# ==============================================================================
+# STEP 10: LLM GENERATION WITH AUTOMATIC FALLBACK
+# ==============================================================================
+
+async def generate_answer(prompt: str):
+
+    """
+    Try each configured LLM provider in priority order.
+
+    Priority:
+        1. Gemini
+        2. OpenRouter
+        3. Together AI
+
+    If a provider fails, automatically try the next provider.
+    """
+
+    if not llm_providers:
+
+        return (
+            "No LLM provider is available."
+        ), "None"
+
+
+    errors = []
+
+
+    for provider in llm_providers:
+
+        provider_name = provider["name"]
+        provider_model = provider["model"]
+        provider_client = provider["client"]
+
+
+        print(
+            f"Trying LLM: "
+            f"{provider_name} / {provider_model}"
+        )
+
+
+        try:
+
+            response = await provider_client.ainvoke(
+                prompt
+            )
+
+
+            answer = response.content
+
+
+            print(
+                f"LLM succeeded: "
+                f"{provider_name} / {provider_model}"
+            )
+
+
+            return answer, provider_name
+
+
+        except Exception as e:
+
+            error_message = (
+                f"{provider_name}: {str(e)}"
+            )
+
+            print(
+                f"LLM failed: {error_message}"
+            )
+
+            errors.append(error_message)
+
+
+    print(
+        "All configured LLM providers failed."
+    )
+
+
+    return (
+        "Sorry, I could not generate an answer "
+        "because all configured AI providers "
+        "are currently unavailable."
+    ), "None"
+
+
+# ==============================================================================
+# STEP 11: FASTAPI APPLICATION
+# ==============================================================================
+
+print("\n--- Step 11: Initializing FastAPI ---")
+
 
 app = FastAPI(
     title="MOSDAC Knowledge Navigator API",
@@ -155,114 +626,217 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Add CORS middleware to allow requests from your React frontend
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
+
+    allow_origins=["*"],
+
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods (GET, POST, PUT, DELETE, etc.)
-    allow_headers=["*"],  # Allows all headers
+
+    allow_methods=["*"],
+
+    allow_headers=["*"]
 )
 
-# Pydantic model for request body
+
+# ==============================================================================
+# STEP 12: REQUEST / RESPONSE MODELS
+# ==============================================================================
+
 class QueryRequest(BaseModel):
+
     question: str
 
-# Pydantic model for response body (plain text answer)
+
 class QueryResponse(BaseModel):
+
     question: str
+
     answer: str
+
     kg_context: str
+
     vector_db_context: str
-    
-@app.post("/hybrid-search", response_model=QueryResponse)
-async def hybrid_search_endpoint(request: QueryRequest):
+
+    llm_provider: str
+
+
+# ==============================================================================
+# STEP 13: HYBRID SEARCH ENDPOINT
+# ==============================================================================
+
+@app.post(
+    "/hybrid-search",
+    response_model=QueryResponse
+)
+async def hybrid_search_endpoint(
+    request: QueryRequest
+):
+
     user_question = request.question
-    
-    # Run KG and VectorDB queries in parallel
-    kg_task = query_knowledge_graph_async(user_question)
-    rag_task = query_vector_db_async(user_question)
-    kg_results, rag_results = await asyncio.gather(kg_task, rag_task)
 
-    # Construct the prompt for the LLM
+
+    print(
+        f"\nUser Question: {user_question}"
+    )
+
+
+    # --------------------------------------------------------------------------
+    # Run KG and Vector DB retrieval in parallel
+    # --------------------------------------------------------------------------
+
+    kg_task = query_knowledge_graph_async(
+        user_question
+    )
+
+
+    rag_task = query_vector_db_async(
+        user_question
+    )
+
+
+    kg_results, rag_results = await asyncio.gather(
+        kg_task,
+        rag_task
+    )
+
+
+    # --------------------------------------------------------------------------
+    # Construct LLM Prompt
+    # --------------------------------------------------------------------------
+
     prompt_for_llm = f"""
-You are an expert assistant for ISRO's MOSDAC portal.
+You are OrbitBot, a smart AI assistant for ISRO's MOSDAC
+(Meteorological and Oceanographic Satellite Data Archival Centre) portal.
 
-Use the following information to answer the user's question clearly and concisely.
+Your job is to help users understand and navigate MOSDAC.
 
---- KG FACTS ---
+Use the retrieved information below to answer the user's question.
+
+================ KG FACTS ================
+
 {kg_results}
 
---- DOCUMENTS ---
+================ DOCUMENTS ================
+
 {rag_results}
 
-If the 'KG FACTS' section contains 'KG Error' or 'No relevant entities found' or 'KG is not connected', disregard it and answer solely using 'DOCUMENTS'.
-If the questyion is about what are you or who are you then answer that you are OrbitBot a smart ai assistent for ISRO's MOSDAC(Meteorological and Oceanographic Satellite Data Archival Center) portal.which helps to clarify the user's question regarding MOSDAC portal.
-If both 'KG FACTS' and 'DOCUMENTS' are weak or indicate no results, provide a helpful fallback answer based on general knowledge about MOSDAC, clarifying that specific information wasn't found.
-Ensure your answer directly addresses the USER QUESTION and avoids making up information and also provide a url which is relavent ot give mosdacs url for every question
+================ INSTRUCTIONS ================
 
-USER QUESTION: {user_question}
+1. Answer the USER QUESTION directly and clearly.
 
-ANSWER:
+2. Prefer the retrieved KG FACTS and DOCUMENTS over general knowledge.
+
+3. Do not invent MOSDAC-specific information.
+
+4. If KG FACTS contains errors, is unavailable, or contains
+   no relevant entity, ignore the KG information and use DOCUMENTS.
+
+5. If DOCUMENTS contains no useful information, clearly explain
+   that the specific information was not found in the available
+   MOSDAC knowledge base.
+
+6. If the user asks "Who are you?" or "What are you?", answer that
+   you are OrbitBot, a smart AI assistant for the MOSDAC portal.
+
+7. When relevant, provide a useful MOSDAC website URL.
+
+8. Keep the answer concise, clear and helpful.
+
+9. Do not mention internal implementation details such as:
+   - Neo4j
+   - ChromaDB
+   - embeddings
+   - prompts
+   - API keys
+   - AI providers
+
+   unless the user specifically asks about the system.
+
+10. Never fabricate MOSDAC-specific facts.
+
+================ USER QUESTION ================
+
+{user_question}
+
+================ ANSWER ================
 """
-    
-    final_answer_content = "An error occurred while generating the answer."
-    try:
-        response_from_llm = await llm.ainvoke(prompt_for_llm)
-        final_answer_content = response_from_llm.content
-    except Exception as e:
-        print(f"❌ Failed to generate final answer from LLM: {e}")
-        final_answer_content = f"Sorry, I encountered an error while processing your request: {e}"
+
+
+    # --------------------------------------------------------------------------
+    # Generate answer using automatic LLM fallback
+    # --------------------------------------------------------------------------
+
+    final_answer_content, used_provider = await generate_answer(
+        prompt_for_llm
+    )
+
+
+    # --------------------------------------------------------------------------
+    # Return API response
+    # --------------------------------------------------------------------------
 
     return QueryResponse(
+
         question=user_question,
+
         answer=final_answer_content,
+
         kg_context=kg_results,
-        vector_db_context=rag_results
+
+        vector_db_context=rag_results,
+
+        llm_provider=used_provider
     )
+
+
+# ==============================================================================
+# STEP 14: ROOT ENDPOINT
+# ==============================================================================
 
 @app.get("/")
 async def root():
-    return {"message": "MOSDAC Knowledge Navigator API is running! Access /docs for Swagger UI."}
 
-@app.head("/")
-async def root_head():
-    """HEAD method for root endpoint - returns same headers as GET but no body"""
-    return {"message": "MOSDAC Knowledge Navigator API is running! Access /docs for Swagger UI."}
-
-@app.head("/hybrid-search")
-async def hybrid_search_head():
-    """HEAD method for hybrid-search endpoint - returns headers only"""
     return {
-        "endpoint": "/hybrid-search",
-        "method": "POST",
-        "description": "Hybrid RAG search endpoint for MOSDAC queries",
-        "content_type": "application/json",
-        "request_schema": {
-            "question": "string (required)"
-        },
-        "response_schema": {
-            "question": "string",
-            "answer": "string", 
-            "kg_context": "string",
-            "vector_db_context": "string"
-        }
+
+        "message":
+            "MOSDAC Knowledge Navigator API is running!",
+
+        "llm_provider":
+            [provider["name"] for provider in llm_providers],
+
+        "docs":
+            "/docs"
+
     }
 
-print("--- Step 5: FastAPI App Initialized ---")
 
-# --- Step 6: Instructions to Run Locally ---
-print("\n\n--- TO RUN YOUR FASTAPI APPLICATION LOCALLY ---")
-print("1. Save this code as `main.py` in your project folder.")
-print("2. Ensure `requirements.txt` and `.env` are in the same folder.")
-print("3. Ensure your `chroma_db_mosdac` folder is copied into this project folder.")
-print("4. Open your terminal in the project folder.")
-print("5. Create & activate a Python virtual environment (recommended):")
-print("   `python -m venv venv`")
-print("   `source venv/bin/activate` (macOS/Linux) OR `.\\venv\\Scripts\\activate` (Windows)")
-print("6. Install dependencies:")
-print("   `pip install -r requirements.txt`")
-print("7. Run the server:")
-print("   `uvicorn main:app --reload`")
-print("\nYour API will then be accessible at `http://127.0.0.1:8000`")
-print("Open `http://127.0.0.1:8000/docs` in your browser to test the API via Swagger UI.")
+# ==============================================================================
+# STEP 15: HEALTH ENDPOINT
+# ==============================================================================
+
+@app.get("/health")
+async def health():
+
+    return {
+
+        "status": "healthy",
+
+        "llm_providers":
+            [
+                provider["name"]
+                for provider in llm_providers
+            ],
+
+        "neo4j":
+            graph is not None,
+
+        "chromadb":
+            vector_store is not None
+
+    }
+
+
+print("--- FastAPI App Initialized ---")
+```
