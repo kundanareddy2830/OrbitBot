@@ -30,7 +30,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from langchain_community.vectorstores import Chroma
 from langchain_community.graphs import Neo4jGraph
-from langchain_community.embeddings import HuggingFaceInferenceAPIEmbeddings
+
+from huggingface_hub import InferenceClient
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openrouter import ChatOpenRouter
@@ -270,12 +271,66 @@ print(
 
 
 # ==============================================================================
-# STEP 4: INITIALIZE HUGGING FACE EMBEDDINGS
+# STEP 4: INITIALIZE HUGGING FACE API EMBEDDINGS
 # ==============================================================================
 
 print("\n====================================================")
 print("STEP 4: HUGGING FACE EMBEDDINGS")
 print("====================================================")
+
+
+# ------------------------------------------------------------------------------
+# LangChain-compatible Hugging Face API embedding wrapper
+# ------------------------------------------------------------------------------
+
+class HuggingFaceAPIEmbeddings:
+
+    def __init__(
+        self,
+        api_key,
+        model_name
+    ):
+
+        self.client = InferenceClient(
+            provider="hf-inference",
+            api_key=api_key
+        )
+
+        self.model_name = model_name
+
+
+    def embed_documents(self, texts):
+
+        embeddings = []
+
+        for text in texts:
+
+            result = self.client.feature_extraction(
+                text,
+                model=self.model_name
+            )
+
+            embeddings.append(
+                result.tolist()
+                if hasattr(result, "tolist")
+                else result
+            )
+
+        return embeddings
+
+
+    def embed_query(self, text):
+
+        result = self.client.feature_extraction(
+            text,
+            model=self.model_name
+        )
+
+        return (
+            result.tolist()
+            if hasattr(result, "tolist")
+            else result
+        )
 
 
 if not HF_API_KEY:
@@ -290,13 +345,22 @@ else:
 
     try:
 
-        embedding_model = HuggingFaceInferenceAPIEmbeddings(
+        embedding_model = HuggingFaceAPIEmbeddings(
             api_key=HF_API_KEY,
             model_name="sentence-transformers/all-MiniLM-L6-v2"
         )
 
         print(
             "Hugging Face embedding client initialized."
+        )
+
+        print(
+            "Hugging Face provider: hf-inference"
+        )
+
+        print(
+            "Embedding model: "
+            "sentence-transformers/all-MiniLM-L6-v2"
         )
 
     except Exception as e:
@@ -703,14 +767,19 @@ async def query_vector_db_async(question: str):
         print("====================================================")
         print("VECTOR DATABASE RETRIEVAL ERROR")
         print("====================================================")
+
         print(
             f"Error type: {type(e).__name__}"
         )
+
         print(
             f"Error message: {str(e)}"
         )
+
         print("----------------------------------------------------")
+
         traceback.print_exc()
+
         print("====================================================")
 
 
@@ -882,6 +951,7 @@ async def hybrid_search_endpoint(
     print("====================================================")
     print("NEW HYBRID SEARCH REQUEST")
     print("====================================================")
+
     print(
         f"Question: {user_question}"
     )
