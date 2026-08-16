@@ -1,16 +1,18 @@
 # ==============================================================================
 # FastAPI Backend: OrbitBot Hybrid Search
 #
-# Supports:
+# LLM Priority:
 #   1. Google Gemini
 #   2. OpenRouter
 #   3. Together AI
 #
-# LLM provider priority:
-#   Gemini -> OpenRouter -> Together
+# Retrieval:
+#   1. ChromaDB + Hugging Face embeddings
+#   2. Neo4j Knowledge Graph
 #
-# If one provider fails during generation, the next available provider
-# is automatically attempted.
+# If Neo4j fails, VectorDB still works.
+# If VectorDB fails, KG/general response can still work.
+# If an LLM fails, the next configured LLM is attempted.
 # ==============================================================================
 
 
@@ -21,6 +23,7 @@
 import os
 import asyncio
 import re
+import traceback
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,20 +40,25 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 
 
-print("--- Step 1: Imports Complete ---")
+print("====================================================")
+print("STEP 1: IMPORTS")
+print("====================================================")
+print("Imports completed successfully.")
 
 
 # ==============================================================================
 # STEP 2: LOAD ENVIRONMENT VARIABLES
 # ==============================================================================
 
-print("\n--- Step 2: Loading Configuration ---")
+print("\n====================================================")
+print("STEP 2: CONFIGURATION")
+print("====================================================")
 
 load_dotenv()
 
 
 # ------------------------------------------------------------------------------
-# LLM API Keys
+# LLM API KEYS
 # ------------------------------------------------------------------------------
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
@@ -59,9 +67,7 @@ TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
 
 
 # ------------------------------------------------------------------------------
-# LLM Models
-#
-# These can be changed from .env without changing Python code.
+# LLM MODELS
 # ------------------------------------------------------------------------------
 
 GEMINI_MODEL = os.getenv(
@@ -81,7 +87,7 @@ TOGETHER_MODEL = os.getenv(
 
 
 # ------------------------------------------------------------------------------
-# Neo4j
+# NEO4J
 # ------------------------------------------------------------------------------
 
 NEO4J_URI = os.getenv("NEO4J_URI")
@@ -90,14 +96,14 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 
 
 # ------------------------------------------------------------------------------
-# Hugging Face
+# HUGGING FACE
 # ------------------------------------------------------------------------------
 
 HF_API_KEY = os.getenv("HF_API_KEY")
 
 
 # ------------------------------------------------------------------------------
-# ChromaDB
+# CHROMADB
 # ------------------------------------------------------------------------------
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -111,23 +117,42 @@ CHROMA_COLLECTION_NAME = "mosdac_knowledge_unified"
 
 
 print("Environment configuration loaded.")
-print(f"Gemini configured:      {bool(GOOGLE_API_KEY)}")
-print(f"OpenRouter configured:  {bool(OPENROUTER_API_KEY)}")
-print(f"Together configured:    {bool(TOGETHER_API_KEY)}")
+
+print(
+    f"Gemini configured:     {bool(GOOGLE_API_KEY)}"
+)
+
+print(
+    f"OpenRouter configured: {bool(OPENROUTER_API_KEY)}"
+)
+
+print(
+    f"Together configured:   {bool(TOGETHER_API_KEY)}"
+)
+
+print(
+    f"HuggingFace configured: {bool(HF_API_KEY)}"
+)
+
+print(
+    f"ChromaDB path: {CHROMA_PERSIST_DIR}"
+)
 
 
 # ==============================================================================
 # STEP 3: INITIALIZE LLM PROVIDERS
 # ==============================================================================
 
-print("\n--- Step 3: Initializing LLM Providers ---")
+print("\n====================================================")
+print("STEP 3: LLM PROVIDERS")
+print("====================================================")
 
 
 llm_providers = []
 
 
 # ------------------------------------------------------------------------------
-# Gemini
+# GEMINI
 # ------------------------------------------------------------------------------
 
 if GOOGLE_API_KEY:
@@ -161,7 +186,7 @@ if GOOGLE_API_KEY:
 
 
 # ------------------------------------------------------------------------------
-# OpenRouter
+# OPENROUTER
 # ------------------------------------------------------------------------------
 
 if OPENROUTER_API_KEY:
@@ -195,7 +220,7 @@ if OPENROUTER_API_KEY:
 
 
 # ------------------------------------------------------------------------------
-# Together AI
+# TOGETHER AI
 # ------------------------------------------------------------------------------
 
 if TOGETHER_API_KEY:
@@ -228,22 +253,19 @@ if TOGETHER_API_KEY:
         )
 
 
-# ------------------------------------------------------------------------------
-# Make sure at least one provider exists
-# ------------------------------------------------------------------------------
-
 if not llm_providers:
 
     raise RuntimeError(
         "No LLM provider is configured. "
-        "Set at least one of: "
-        "GOOGLE_API_KEY, OPENROUTER_API_KEY, TOGETHER_API_KEY."
+        "Configure at least one of "
+        "GOOGLE_API_KEY, OPENROUTER_API_KEY, "
+        "or TOGETHER_API_KEY."
     )
 
 
 print(
-    f"Available LLM providers: "
-    f"{[provider['name'] for provider in llm_providers]}"
+    "Available LLM providers:",
+    [provider["name"] for provider in llm_providers]
 )
 
 
@@ -251,113 +273,189 @@ print(
 # STEP 4: INITIALIZE HUGGING FACE EMBEDDINGS
 # ==============================================================================
 
-print("\n--- Step 4: Initializing Embeddings ---")
+print("\n====================================================")
+print("STEP 4: HUGGING FACE EMBEDDINGS")
+print("====================================================")
 
 
 if not HF_API_KEY:
 
-    raise RuntimeError(
-        "HF_API_KEY is missing. "
-        "Hugging Face is required for the current ChromaDB embeddings."
-    )
-
-
-try:
-
-    embedding_model = HuggingFaceInferenceAPIEmbeddings(
-        api_key=HF_API_KEY,
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
-    )
-
     print(
-        "Hugging Face embedding model initialized."
+        "WARNING: HF_API_KEY is missing."
     )
 
-except Exception as e:
+    embedding_model = None
 
-    raise RuntimeError(
-        f"Failed to initialize Hugging Face embeddings: {e}"
-    )
+else:
+
+    try:
+
+        embedding_model = HuggingFaceInferenceAPIEmbeddings(
+            api_key=HF_API_KEY,
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
+        )
+
+        print(
+            "Hugging Face embedding client initialized."
+        )
+
+    except Exception as e:
+
+        print(
+            "Hugging Face embedding initialization failed:"
+        )
+
+        print(
+            f"{type(e).__name__}: {e}"
+        )
+
+        embedding_model = None
 
 
 # ==============================================================================
-# STEP 5: INITIALIZE NEO4J KNOWLEDGE GRAPH
+# STEP 5: CONNECT TO NEO4J
 # ==============================================================================
 
-print("\n--- Step 5: Connecting to Neo4j ---")
+print("\n====================================================")
+print("STEP 5: NEO4J")
+print("====================================================")
 
 
-try:
-
-    graph = Neo4jGraph(
-        url=NEO4J_URI,
-        username=NEO4J_USERNAME,
-        password=NEO4J_PASSWORD
-    )
-
-    print("Connected to Neo4j KG.")
+graph = None
 
 
-except Exception as e:
+if not NEO4J_URI:
 
     print(
-        f"Failed to connect to Neo4j: {e}"
+        "NEO4J_URI is missing."
     )
 
-    print(
-        "KG functionality will be disabled."
-    )
+else:
 
-    graph = None
+    try:
+
+        graph = Neo4jGraph(
+            url=NEO4J_URI,
+            username=NEO4J_USERNAME,
+            password=NEO4J_PASSWORD
+        )
+
+        print(
+            "Neo4j connected successfully."
+        )
+
+    except Exception as e:
+
+        print(
+            "Neo4j connection failed."
+        )
+
+        print(
+            f"{type(e).__name__}: {e}"
+        )
+
+        print(
+            "KG functionality will be disabled."
+        )
+
+        graph = None
 
 
 # ==============================================================================
-# STEP 6: INITIALIZE CHROMADB
+# STEP 6: LOAD CHROMADB
 # ==============================================================================
 
-print("\n--- Step 6: Loading ChromaDB ---")
+print("\n====================================================")
+print("STEP 6: CHROMADB")
+print("====================================================")
 
 
-try:
+vector_store = None
+retriever = None
+document_count = 0
 
-    vector_store = Chroma(
-        collection_name=CHROMA_COLLECTION_NAME,
-        persist_directory=CHROMA_PERSIST_DIR,
-        embedding_function=embedding_model
-    )
 
-    retriever = vector_store.as_retriever(
-        search_kwargs={
-            "k": 3
-        }
-    )
-
-    document_count = vector_store._collection.count()
+if embedding_model is None:
 
     print(
-        f"ChromaDB loaded successfully."
+        "ChromaDB cannot initialize because "
+        "the embedding model is unavailable."
     )
 
-    print(
-        f"Documents: {document_count}"
-    )
+else:
+
+    try:
+
+        print(
+            f"Opening ChromaDB at: {CHROMA_PERSIST_DIR}"
+        )
+
+        vector_store = Chroma(
+            collection_name=CHROMA_COLLECTION_NAME,
+            persist_directory=CHROMA_PERSIST_DIR,
+            embedding_function=embedding_model
+        )
+
+        document_count = (
+            vector_store._collection.count()
+        )
+
+        print(
+            "ChromaDB loaded successfully."
+        )
+
+        print(
+            f"Documents: {document_count}"
+        )
+
+        retriever = vector_store.as_retriever(
+            search_kwargs={
+                "k": 3
+            }
+        )
+
+        print(
+            "ChromaDB retriever initialized."
+        )
+
+    except Exception as e:
+
+        print(
+            "ChromaDB initialization failed."
+        )
+
+        print(
+            f"Error type: {type(e).__name__}"
+        )
+
+        print(
+            f"Error message: {e}"
+        )
+
+        vector_store = None
+        retriever = None
 
 
-except Exception as e:
+print("\n====================================================")
+print("INITIALIZATION SUMMARY")
+print("====================================================")
 
-    print(
-        f"Failed to load ChromaDB: {e}"
-    )
+print(
+    f"LLM providers: "
+    f"{[p['name'] for p in llm_providers]}"
+)
 
-    print(
-        "VectorDB functionality will be disabled."
-    )
+print(
+    f"Neo4j: {graph is not None}"
+)
 
-    vector_store = None
-    retriever = None
+print(
+    f"ChromaDB: {vector_store is not None}"
+)
 
-
-print("\n--- Models and Retrievers Initialized ---")
+print(
+    f"Documents: {document_count}"
+)
 
 
 # ==============================================================================
@@ -387,13 +485,16 @@ key_kg_entities = [
 
 async def query_knowledge_graph_async(question: str):
 
-    print("Querying Knowledge Graph...")
-
+    print("\n[KG] Query started.")
 
     if graph is None:
 
+        print(
+            "[KG] Neo4j unavailable."
+        )
+
         return (
-            "KG is not connected or initialized."
+            "KG unavailable."
         )
 
 
@@ -413,9 +514,13 @@ async def query_knowledge_graph_async(question: str):
 
     if not found_entities:
 
+        print(
+            "[KG] No high-confidence entities detected."
+        )
+
         return (
-            "KG: No specific, high-confidence "
-            "entities found for this query."
+            "KG: No specific high-confidence "
+            "entities found."
         )
 
 
@@ -424,14 +529,13 @@ async def query_knowledge_graph_async(question: str):
 
     for entity in found_entities:
 
-        cypher = f"""
+        cypher = """
         MATCH (n)
-
         WHERE
-            toLower(n.name) = toLower('{entity}')
+            toLower(n.name) = toLower($entity)
             OR
-            toLower(n.description)
-            CONTAINS toLower('{entity}')
+            toLower(coalesce(n.description, ''))
+            CONTAINS toLower($entity)
 
         RETURN
             n.name AS name,
@@ -446,7 +550,10 @@ async def query_knowledge_graph_async(question: str):
 
             query_result = await asyncio.to_thread(
                 graph.query,
-                cypher
+                cypher,
+                params={
+                    "entity": entity
+                }
             )
 
 
@@ -455,11 +562,10 @@ async def query_knowledge_graph_async(question: str):
                 for record in query_result:
 
                     results.append(
-                        f"KG Fact: "
+                        "KG Fact: "
                         f"Name='{record.get('name')}', "
                         f"Description='{record.get('description')}'"
                     )
-
 
             else:
 
@@ -468,11 +574,15 @@ async def query_knowledge_graph_async(question: str):
                 )
 
 
-        except Exception:
+        except Exception as e:
+
+            print(
+                f"[KG] Error for {entity}: "
+                f"{type(e).__name__}: {e}"
+            )
 
             results.append(
-                f"KG Error for '{entity}': "
-                f"Query execution failed."
+                f"KG Error for '{entity}'."
             )
 
 
@@ -485,17 +595,46 @@ async def query_knowledge_graph_async(question: str):
 
 async def query_vector_db_async(question: str):
 
-    print("Querying Vector DB...")
+    print("\n[VECTOR] Query started.")
 
+    if vector_store is None:
 
-    if vector_store is None or retriever is None:
+        print(
+            "[VECTOR] Vector store is unavailable."
+        )
 
         return (
-            "VectorDB is not loaded or initialized."
+            "VectorDB unavailable."
+        )
+
+
+    if retriever is None:
+
+        print(
+            "[VECTOR] Retriever is unavailable."
+        )
+
+        return (
+            "VectorDB retriever unavailable."
+        )
+
+
+    if not question.strip():
+
+        print(
+            "[VECTOR] Empty question."
+        )
+
+        return (
+            "VectorDB: Empty question."
         )
 
 
     try:
+
+        print(
+            f"[VECTOR] Searching for: {question}"
+        )
 
         docs = await asyncio.to_thread(
             retriever.invoke,
@@ -503,53 +642,101 @@ async def query_vector_db_async(question: str):
         )
 
 
-        if docs:
+        if not docs:
 
-            return "\n".join(
-                [
-                    doc.page_content
-                    for doc in docs
-                ]
+            print(
+                "[VECTOR] Search completed. "
+                "No documents returned."
+            )
+
+            return "No documents found."
+
+
+        print(
+            f"[VECTOR] Search successful. "
+            f"Retrieved {len(docs)} documents."
+        )
+
+
+        contexts = []
+
+
+        for index, doc in enumerate(docs):
+
+            content = getattr(
+                doc,
+                "page_content",
+                ""
+            )
+
+            if content:
+
+                contexts.append(
+                    content
+                )
+
+                print(
+                    f"[VECTOR] Document {index + 1}: "
+                    f"{len(content)} characters"
+                )
+
+
+        if not contexts:
+
+            print(
+                "[VECTOR] Documents returned but "
+                "contained no page content."
+            )
+
+            return (
+                "Documents were retrieved but "
+                "contained no usable content."
             )
 
 
-        return "No documents found."
+        return "\n\n".join(contexts)
 
 
     except Exception as e:
 
+        print("\n")
+        print("====================================================")
+        print("VECTOR DATABASE RETRIEVAL ERROR")
+        print("====================================================")
         print(
-            f"VectorDB error: {e}"
+            f"Error type: {type(e).__name__}"
         )
+        print(
+            f"Error message: {str(e)}"
+        )
+        print("----------------------------------------------------")
+        traceback.print_exc()
+        print("====================================================")
+
 
         return (
             "VectorDB Error: "
-            "Data retrieval failed."
+            f"{type(e).__name__}: {str(e)}"
         )
 
 
 # ==============================================================================
-# STEP 10: LLM GENERATION WITH AUTOMATIC FALLBACK
+# STEP 10: LLM GENERATION WITH FALLBACK
 # ==============================================================================
 
 async def generate_answer(prompt: str):
 
-    """
-    Try each configured LLM provider in priority order.
-
-    Priority:
-        1. Gemini
-        2. OpenRouter
-        3. Together AI
-
-    If a provider fails, automatically try the next provider.
-    """
-
     if not llm_providers:
 
         return (
-            "No LLM provider is available."
-        ), "None"
+            "No LLM provider is available.",
+            "None"
+        )
+
+
+    print("\n====================================================")
+    print("LLM GENERATION")
+    print("====================================================")
 
 
     errors = []
@@ -563,8 +750,7 @@ async def generate_answer(prompt: str):
 
 
         print(
-            f"Trying LLM: "
-            f"{provider_name} / {provider_model}"
+            f"Trying: {provider_name} / {provider_model}"
         )
 
 
@@ -578,26 +764,39 @@ async def generate_answer(prompt: str):
             answer = response.content
 
 
+            if not answer:
+
+                raise RuntimeError(
+                    "LLM returned an empty response."
+                )
+
+
             print(
                 f"LLM succeeded: "
-                f"{provider_name} / {provider_model}"
+                f"{provider_name}"
             )
 
 
-            return answer, provider_name
+            return (
+                answer,
+                provider_name
+            )
 
 
         except Exception as e:
 
             error_message = (
-                f"{provider_name}: {str(e)}"
+                f"{provider_name}: "
+                f"{type(e).__name__}: {e}"
             )
 
             print(
                 f"LLM failed: {error_message}"
             )
 
-            errors.append(error_message)
+            errors.append(
+                error_message
+            )
 
 
     print(
@@ -608,15 +807,18 @@ async def generate_answer(prompt: str):
     return (
         "Sorry, I could not generate an answer "
         "because all configured AI providers "
-        "are currently unavailable."
-    ), "None"
+        "are currently unavailable.",
+        "None"
+    )
 
 
 # ==============================================================================
 # STEP 11: FASTAPI APPLICATION
 # ==============================================================================
 
-print("\n--- Step 11: Initializing FastAPI ---")
+print("\n====================================================")
+print("STEP 11: FASTAPI")
+print("====================================================")
 
 
 app = FastAPI(
@@ -673,36 +875,69 @@ async def hybrid_search_endpoint(
     request: QueryRequest
 ):
 
-    user_question = request.question
+    user_question = request.question.strip()
 
 
+    print("\n")
+    print("====================================================")
+    print("NEW HYBRID SEARCH REQUEST")
+    print("====================================================")
     print(
-        f"\nUser Question: {user_question}"
+        f"Question: {user_question}"
     )
 
 
+    if not user_question:
+
+        return QueryResponse(
+
+            question=user_question,
+
+            answer="Please provide a question.",
+
+            kg_context="",
+
+            vector_db_context="",
+
+            llm_provider="None"
+
+        )
+
+
     # --------------------------------------------------------------------------
-    # Run KG and Vector DB retrieval in parallel
+    # RUN KG + VECTOR SEARCH IN PARALLEL
     # --------------------------------------------------------------------------
 
     kg_task = query_knowledge_graph_async(
         user_question
     )
 
-
-    rag_task = query_vector_db_async(
+    vector_task = query_vector_db_async(
         user_question
     )
 
 
-    kg_results, rag_results = await asyncio.gather(
+    kg_results, vector_results = await asyncio.gather(
         kg_task,
-        rag_task
+        vector_task
+    )
+
+
+    print(
+        "\nRetrieval completed."
+    )
+
+    print(
+        f"KG result length: {len(kg_results)}"
+    )
+
+    print(
+        f"Vector result length: {len(vector_results)}"
     )
 
 
     # --------------------------------------------------------------------------
-    # Construct LLM Prompt
+    # CONSTRUCT LLM PROMPT
     # --------------------------------------------------------------------------
 
     prompt_for_llm = f"""
@@ -719,7 +954,7 @@ Use the retrieved information below to answer the user's question.
 
 ================ DOCUMENTS ================
 
-{rag_results}
+{vector_results}
 
 ================ INSTRUCTIONS ================
 
@@ -727,31 +962,26 @@ Use the retrieved information below to answer the user's question.
 
 2. Prefer the retrieved KG FACTS and DOCUMENTS over general knowledge.
 
-3. Do not invent MOSDAC-specific information.
+3. Never invent MOSDAC-specific information.
 
-4. If KG FACTS contains errors, is unavailable, or contains
-   no relevant entity, ignore the KG information and use DOCUMENTS.
+4. If KG is unavailable or contains no useful information,
+   simply rely on the DOCUMENTS.
 
-5. If DOCUMENTS contains no useful information, clearly explain
-   that the specific information was not found in the available
-   MOSDAC knowledge base.
+5. If the DOCUMENTS say that no useful information was found,
+   clearly state that the specific information was not found
+   in the available MOSDAC knowledge base.
 
-6. If the user asks "Who are you?" or "What are you?", answer that
-   you are OrbitBot, a smart AI assistant for the MOSDAC portal.
+6. If the user asks "Who are you?" or "What are you?",
+   answer that you are OrbitBot, a smart AI assistant for
+   the MOSDAC portal.
 
-7. When relevant, provide a useful MOSDAC website URL.
+7. When relevant, provide the useful official MOSDAC website URL.
 
-8. Keep the answer concise, clear and helpful.
+8. Keep the response concise, clear and helpful.
 
-9. Do not mention internal implementation details such as:
-   - Neo4j
-   - ChromaDB
-   - embeddings
-   - prompts
-   - API keys
-   - AI providers
-
-   unless the user specifically asks about the system.
+9. Do not mention internal implementation details such as
+   Neo4j, ChromaDB, embeddings, prompts, API keys, or
+   AI providers unless the user specifically asks about them.
 
 10. Never fabricate MOSDAC-specific facts.
 
@@ -764,7 +994,7 @@ Use the retrieved information below to answer the user's question.
 
 
     # --------------------------------------------------------------------------
-    # Generate answer using automatic LLM fallback
+    # GENERATE ANSWER
     # --------------------------------------------------------------------------
 
     final_answer_content, used_provider = await generate_answer(
@@ -773,7 +1003,7 @@ Use the retrieved information below to answer the user's question.
 
 
     # --------------------------------------------------------------------------
-    # Return API response
+    # RETURN RESPONSE
     # --------------------------------------------------------------------------
 
     return QueryResponse(
@@ -784,9 +1014,10 @@ Use the retrieved information below to answer the user's question.
 
         kg_context=kg_results,
 
-        vector_db_context=rag_results,
+        vector_db_context=vector_results,
 
         llm_provider=used_provider
+
     )
 
 
@@ -802,8 +1033,11 @@ async def root():
         "message":
             "MOSDAC Knowledge Navigator API is running!",
 
-        "llm_provider":
-            [provider["name"] for provider in llm_providers],
+        "llm_providers":
+            [
+                provider["name"]
+                for provider in llm_providers
+            ],
 
         "docs":
             "/docs"
@@ -820,7 +1054,8 @@ async def health():
 
     return {
 
-        "status": "healthy",
+        "status":
+            "healthy",
 
         "llm_providers":
             [
@@ -832,9 +1067,18 @@ async def health():
             graph is not None,
 
         "chromadb":
-            vector_store is not None
+            vector_store is not None,
+
+        "documents":
+            document_count
 
     }
 
 
-print("--- FastAPI App Initialized ---")
+# ==============================================================================
+# STARTUP COMPLETE
+# ==============================================================================
+
+print("\n====================================================")
+print("FASTAPI APPLICATION INITIALIZED")
+print("====================================================")
