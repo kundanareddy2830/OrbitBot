@@ -1,4 +1,3 @@
-```python
 # ==============================================================================
 # FastAPI Backend: OrbitBot Hybrid Search
 #
@@ -839,4 +838,3 @@ async def health():
 
 
 print("--- FastAPI App Initialized ---")
-```
